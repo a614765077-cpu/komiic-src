@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Komiic 漫画书源</title>
+</head>
+<body></body>
+<script>
+  // ============================================================
+  // 轻悦时光 / 小艺 (鸿蒙) 书源桥接代码 —— 与官方 README 通用 js 一致
+  // ============================================================
+  var isCookieJar = true; // 需要 CookieJar 请保持 true
+  var _bridge = {
+    init: function () {
+      if (window.flutter_inappwebview) { this.isReady = true; this.cookieJar(); }
+      else {
+        var self = this;
+        window.addEventListener('flutterInAppWebViewPlatformReady', function () {
+          self.isReady = true; self.cookieJar();
+        });
+      }
+    },
+    async cookieJar() { try { await window.flutter_inappwebview.callHandler('CookieJar', isCookieJar); } catch (e) {} },
+    async log(str)   { try { return await window.flutter_inappwebview.callHandler('log', str); } catch (e) { return false; } },
+    async text(t, s) { try { return await window.flutter_inappwebview.callHandler('text', t, s); } catch (e) { return false; } },
+    async toast(s)   { try { return await window.flutter_inappwebview.callHandler('showToast', s); } catch (e) { return false; } },
+    async addbook(u) { try { return await window.flutter_inappwebview.callHandler('addbook', u); } catch (e) { return ""; } }
+  };
+  _bridge.init();
+
+  // HTTP 工具（方法名与官方一致）
+  var Http = {
+    async Get(url, headers, fr) {
+      try { return await window.flutter_inappwebview.callHandler('http', 'get', url, "", JSON.stringify(headers || {}), fr === undefined ? true : fr, ""); } catch (e) { return null; }
+    },
+    async Post(url, headers, body, contentType, fr) {
+      try { return await window.flutter_inappwebview.callHandler('http', 'post', url, body, JSON.stringify(headers || {}), fr === undefined ? true : fr, contentType || ""); } catch (e) { return null; }
+    },
+    async Head(url, headers, fr) {
+      try { return await window.flutter_inappwebview.callHandler('http', 'head', url, "", JSON.stringify(headers || {}), fr === undefined ? true : fr, ""); } catch (e) { return null; }
+    }
+  };
+  var flutterBridge = _bridge;
+</script>
+<script>
+  // ============================================================
+  // Komiic (https://komiic.cc) 漫画书源
+  // 数据来自 GraphQL 端点 POST /api/query
+  // ============================================================
+  var GQL_URL = "https://komiic.cc/api/query";
+
+  // GraphQL 请求封装
+  async function gql(query, variables) {
+    var resp = await Http.Post(GQL_URL, { "Content-Type": "application/json" }, JSON.stringify({ query: query, variables: variables || {} }), "application/json", true);
+    var d = (resp && resp.data !== undefined) ? resp.data : resp;
+    if (typeof d === "string") { try { d = JSON.parse(d); } catch (e) {} }
+    if (d && d.errors) { flutterBridge.log("Komiic gql err: " + JSON.stringify(d.errors).slice(0, 300)); }
+    return d ? d.data : null;
+  }
+
+  function comicIdFrom(url) {
+    var m = String(url).match(/\/comic\/(\d+)/);
+    return m ? m[1] : String(url).trim();
+  }
+
+  // ---- 搜索 ----
+  async function search(key, page) {
+    if (page >= 2) return "[]";
+    var data = await gql(
+      'query($kw:String!){ searchComicsAndAuthors(keyword:$kw){ comics { id title imageUrl status authors{ name } } } }',
+      { kw: key }
+    );
+    var comics = (data && data.searchComicsAndAuthors && data.searchComicsAndAuthors.comics) || [];
+    var books = comics.map(function (c) {
+      var auth = (c.authors || []).map(function (a) { return a.name; }).join("、");
+      return {
+        bookUrl: "https://komiic.cc/comic/" + c.id,
+        name: c.title,
+        author: auth,
+        coverUrl: c.imageUrl,
+        kind: c.status,
+        type: 2, // 漫画
+        latestChapterTitle: ""
+      };
+    });
+    return JSON.stringify(books);
+  }
+
+  // ---- 详情 ----
+  async function info(bookurl) {
+    var cid = comicIdFrom(bookurl);
+    var data = await gql(
+      'query($cid:ID!){ comicById(comicId:$cid){ id title imageUrl status description authors{ name } otherTitles } }',
+      { cid: cid }
+    );
+    var c = data && data.comicById;
+    var auth = (c && c.authors || []).map(function (a) { return a.name; }).join("、");
+    var intro = (c && c.description) || "";
+    if (c && c.otherTitles && c.otherTitles.length) intro += "\n别名：" + c.otherTitles.join("、");
+    return JSON.stringify({
+      bookUrl: bookurl,
+      name: c ? c.title : "",
+      author: auth,
+      kind: c ? c.status : "",
+      coverUrl: c ? c.imageUrl : "",
+      intro: intro,
+      tocUrl: bookurl,
+      latestChapterTitle: "",
+      type: 2
+    });
+  }
+
+  // ---- 目录 ----
+  async function chapter(tocUrl) {
+    var cid = comicIdFrom(tocUrl);
+    var data = await gql(
+      'query($cid:ID!){ chaptersByComicId(comicId:$cid){ id serial } }',
+      { cid: cid }
+    );
+    var list = (data && data.chaptersByComicId) || [];
+    var chapters = list.map(function (ch, i) {
+      return {
+        name: "第" + ch.serial + "话",
+        chapterId: "https://komiic.cc/comic/" + cid + "/chapter/" + ch.id,
+        index: i,
+        isVip: false,
+        isPay: false,
+        isVolume: false,
+        tag: ""
+      };
+    });
+    return JSON.stringify(chapters);
+  }
+
+  // ---- 正文（漫画图片） ----
+  async function content(url) {
+    var m = String(url).match(/\/comic\/(\d+)\/chapter\/([^/\s]+)/);
+    var chid = m ? m[2] : String(url).trim();
+    var data = await gql(
+      'query($ch:ID!){ imageTicketsByChapterId(chapterId:$ch){ url ticket } }',
+      { ch: chid }
+    );
+    var tickets = (data && data.imageTicketsByChapterId) || [];
+    var html = tickets.map(function (t) {
+      return '<img src="' + t.url + ",{'headers':{'X-Image-Ticket':'" + t.ticket + "'}}\"/>";
+    }).join("\r\n");
+    return html;
+  }
+
+  // ---------- 分页参数构造 ----------
+  function pagination(limit, offset, orderBy, asc) {
+    return { limit: limit, offset: offset, orderBy: orderBy, asc: asc };
+  }
+
+  // ---------- 发现 / 榜单 ----------
+  var KOMIIC_CATS = [
+    ["1", "愛情"], ["5", "搞笑"], ["97", "劇情"], ["8", "冒險"], ["13", "格鬥"],
+    ["64", "動作"], ["57", "黑暗奇幻"], ["17", "科幻"], ["7", "懸疑"], ["9", "恐怖"],
+    ["18", "百合"], ["16", "耽美"], ["4", "校園"], ["47", "異世界"], ["56", "轉生"],
+    ["2", "後宮"], ["32", "歷史"], ["27", "美食"], ["22", "競技"], ["19", "治癒"],
+    ["129", "溫馨"], ["20", "萌系"], ["113", "少女"], ["246", "青年"], ["21", "熱血"]
+  ];
+
+  async function getfinds() {
+    var finds = [
+      { title: "最新更新", url: "https://komiic.cc/find?t=recent", type: 0, width: 0 },
+      { title: "热门漫画", url: "https://komiic.cc/find?t=hot", type: 0, width: 0 },
+      { title: "随机推荐", url: "https://komiic.cc/find?t=random", type: 0, width: 0 }
+    ];
+    KOMIIC_CATS.forEach(function (c) {
+      finds.push({ title: "漫画·" + c[1], url: "https://komiic.cc/find?t=cat&id=" + c[0], type: 0, width: 0 });
+    });
+    return JSON.stringify(finds);
+  }
+
+  async function find(url, page) {
+    var u = String(url).match(/find\?t=([a-z]+)(?:&id=([^&]+))?/);
+    var t = u ? u[1] : "recent";
+    var catId = u ? u[2] : null;
+    var limit = 20;
+    var offset = (page - 1) * limit;
+    var data = null;
+
+    if (t === "hot") {
+      data = await gql(
+        'query($p:Pagination!){ hotComics(pagination:$p){ id title imageUrl status } }',
+        { p: pagination(limit, offset, "MONTH_VIEWS", false) }
+      );
+    } else if (t === "random") {
+      if (page >= 2) return "[]"; // 随机无需分页
+      data = await gql(
+        'query($p:Pagination!){ randomComics(pagination:$p){ id title imageUrl status } }',
+        { p: pagination(limit, 0, "RANDOM", true) }
+      );
+    } else if (t === "cat") {
+      data = await gql(
+        'query($c:[ID!]!,$p:Pagination!){ comicByCategories(categoryId:$c,pagination:$p){ id title imageUrl status } }',
+        { c: [catId || "1"], p: pagination(limit, offset, "DATE_UPDATED", false) }
+      );
+    } else { // recent
+      data = await gql(
+        'query($p:Pagination!){ recentUpdate(pagination:$p){ id title imageUrl status } }',
+        { p: pagination(limit, offset, "COMIC_DATE_UPDATED", false) }
+      );
+    }
+    var root = data ? data[Object.keys(data)[0]] : null;
+    var list = root || [];
+    var books = list.map(function (c) {
+      return {
+        bookUrl: "https://komiic.cc/comic/" + c.id,
+        name: c.title,
+        coverUrl: c.imageUrl,
+        kind: c.status,
+        type: 2
+      };
+    });
+    return JSON.stringify(books);
+  }
+
+  // ---------- 登录（会员账号） ----------
+  // Komiic 为 cookie 会话登录：返回登录页，App 用 webview 打开、
+  // CookieJar 保存会话 cookie，后续 /api/query 与图片请求自动携带。
+  async function getloginurl() {
+    return "https://komiic.cc/login";
+  }
+</script>
+</html>
