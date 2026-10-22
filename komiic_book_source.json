@@ -1,0 +1,13 @@
+[
+  {
+    "bookSourceUrl": "https://komiic.cc",
+    "bookSourceName": "Komiic漫画",
+    "bookSourceGroup": "漫画",
+    "enabled": true,
+    "enabledExplore": true,
+    "help": false,
+    "login": true,
+    "author": "小艺Work",
+    "html": "https://cdn.jsdelivr.net/gh/a614765077-cpu/komiic-src@main/komiic_book_source.html"
+  }
+]
